@@ -983,6 +983,60 @@ const TRANSPORT_MODE = CONFIG.transport;
 const HTTP_PORT = parseInt(CONFIG.httpPort);
 const HTTP_HOST = CONFIG.httpHost;
 
+// Load exclusions from Obsidian settings
+function loadExclusions(): string[] {
+  const defaultExclusions = ['.obsidian', '.git', '.DS_Store'];
+  try {
+    const appJsonPath = path.join(VAULT_PATH, '.obsidian', 'app.json');
+    if (fs.existsSync(appJsonPath)) {
+      const appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
+      if (appJson.userIgnoreFilters && Array.isArray(appJson.userIgnoreFilters)) {
+        return [...defaultExclusions, ...appJson.userIgnoreFilters];
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to load exclusions from app.json:', error);
+  }
+  return defaultExclusions;
+}
+
+const EXCLUSIONS = loadExclusions();
+
+function isExcluded(filePath: string): boolean {
+  // Always exclude common system files/folders regardless of location
+  const basename = path.basename(filePath);
+  if (basename === '.DS_Store' || basename === '.git') {
+    return true;
+  }
+
+  // Normalize path to use forward slashes for comparison
+  const normalizedPath = filePath.split(path.sep).join('/');
+
+  for (const exclusion of EXCLUSIONS) {
+    // Normalize exclusion path
+    let normalizedExclusion = exclusion.split(path.sep).join('/');
+
+    // Handle directory exclusion (ends with /)
+    if (normalizedExclusion.endsWith('/')) {
+      // Check if it matches the directory exactly or is a child of it
+      if (normalizedPath === normalizedExclusion.slice(0, -1) ||
+          normalizedPath.startsWith(normalizedExclusion)) {
+        return true;
+      }
+    } else {
+      // Exact match
+      if (normalizedPath === normalizedExclusion) {
+        return true;
+      }
+      // Check if it's a file inside an excluded folder (that didn't have trailing slash in config)
+      if (normalizedPath.startsWith(normalizedExclusion + '/')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Configuration loaded
 
 // Validate vault path exists
@@ -1535,6 +1589,16 @@ class ObsidianMcpServer {
     const folderPath = args.path;
     const newPath = args.newPath;
     
+    // Check if the target folder is excluded (except for create, where we might be creating it?)
+    // Actually, we shouldn't create excluded folders either.
+    if (isExcluded(folderPath)) {
+      throw new Error(`Folder is excluded or not found: ${folderPath}`);
+    }
+
+    if (newPath && isExcluded(newPath)) {
+      throw new Error(`Cannot move/rename to excluded path: ${newPath}`);
+    }
+
     switch (operation) {
       case 'create':
         await this.createFolder(folderPath);
@@ -1597,6 +1661,10 @@ class ObsidianMcpServer {
       throw new Error('Path and edits are required');
     }
     
+    if (isExcluded(args.path)) {
+      throw new Error(`Note not found: ${args.path}`);
+    }
+
     if (!Array.isArray(args.edits)) {
       throw new Error('Edits must be an array');
     }
@@ -2136,6 +2204,13 @@ Your goal is to help users see beyond apparent limitations and discover innovati
       for (const item of items) {
         const fullPath = folderPath ? `${folderPath}/${item}` : item;
         
+        // Check exclusion
+        // For folders, we might want to check the path without trailing slash too
+        const checkPath = fullPath.endsWith('/') ? fullPath.slice(0, -1) : fullPath;
+        if (isExcluded(checkPath)) {
+          continue;
+        }
+
         if (item.endsWith('/')) {
           // It's a folder
           if (recursive) {
@@ -2175,11 +2250,14 @@ Your goal is to help users see beyond apparent limitations and discover innovati
     const items = fs.readdirSync(dir);
     
     for (const item of items) {
-      if (item === '.obsidian' || item === '.git' || item === '.DS_Store') {
+      const fullPath = path.join(dir, item);
+      const relativePath = path.relative(VAULT_PATH, fullPath);
+
+      // Check exclusion using the global isExcluded function
+      if (isExcluded(relativePath)) {
         continue;
       }
       
-      const fullPath = path.join(dir, item);
       const stat = fs.statSync(fullPath);
       
       if (stat.isDirectory()) {
@@ -2190,7 +2268,6 @@ Your goal is to help users see beyond apparent limitations and discover innovati
         // If not recursive, skip directories
       } else {
         // Include all file types, not just .md files
-        const relativePath = path.relative(VAULT_PATH, fullPath);
         files.push(relativePath);
       }
     }
@@ -2199,6 +2276,10 @@ Your goal is to help users see beyond apparent limitations and discover innovati
   }
 
   private async readNote(notePath: string): Promise<string> {
+    if (isExcluded(notePath)) {
+      throw new Error(`Note not found: ${notePath}`);
+    }
+
     try {
       // First try using the Obsidian API
       const response = await this.api.get(`/vault/${encodeURIComponent(notePath)}`);
@@ -2219,6 +2300,10 @@ Your goal is to help users see beyond apparent limitations and discover innovati
   }
 
   private async createNote(notePath: string, content: string): Promise<void> {
+    if (isExcluded(notePath)) {
+      throw new Error(`Cannot create note in excluded path: ${notePath}`);
+    }
+
     try {
       // First try using the Obsidian API
       await this.api.post(`/vault/${encodeURIComponent(notePath)}`, { content });
@@ -2250,8 +2335,12 @@ Your goal is to help users see beyond apparent limitations and discover innovati
       // API data received
       // Check if API returns results directly or wrapped in {results: ...}
       const results = response.data.results || response.data || [];
+
+      // Filter out excluded files
+      const filteredResults = results.filter((result: any) => !isExcluded(result.path || result.filename));
+
       // Search results processed
-      return results;
+      return filteredResults;
     } catch (error) {
       console.warn('API request failed, falling back to simple search:', error);
       
@@ -2320,6 +2409,10 @@ Your goal is to help users see beyond apparent limitations and discover innovati
   }
 
   private async deleteNote(notePath: string): Promise<void> {
+    if (isExcluded(notePath)) {
+      throw new Error(`Note not found: ${notePath}`);
+    }
+
     try {
       // First try using the Obsidian API
       await this.api.delete(`/vault/${encodeURIComponent(notePath)}`);
@@ -2391,6 +2484,13 @@ Your goal is to help users see beyond apparent limitations and discover innovati
   }
 
   private async moveNote(sourcePath: string, destinationPath: string): Promise<void> {
+    if (isExcluded(sourcePath)) {
+      throw new Error(`Note not found: ${sourcePath}`);
+    }
+    if (isExcluded(destinationPath)) {
+      throw new Error(`Cannot move note to excluded path: ${destinationPath}`);
+    }
+
     try {
       // First try using the Obsidian API - using standard file operations
       // Most Obsidian Local REST API implementations don't support direct move operations
