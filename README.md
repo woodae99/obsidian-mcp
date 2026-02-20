@@ -40,6 +40,10 @@ The MCP server provides the following comprehensive tools:
 - `create_note`: Create a new note in the Obsidian vault with full content
 - `delete_note`: Delete a note from the Obsidian vault
 - `search_vault`: Advanced search across all file types with filename and content matching
+  - **Pagination**: `limit` (1-500, default 50), `offset` (default 0)
+  - **Filtering**: `pathPrefix`, `extensions`, `matchType` (`filename` | `content` | `both`)
+  - **Sorting**: `sortBy` (`score` | `path`) and `sortDirection` (`asc` | `desc`)
+  - **Structured output**: Returns `total`, `returned`, `hasMore`, and paged `results`
   - **Respects exclusion settings**: Search results exclude files matching Obsidian's exclusion patterns
 - `move_note`: Move or rename notes to new locations (supports all file types including PDFs)
 - `manage_folder`: Complete folder CRUD operations (create/rename/move/delete)
@@ -70,8 +74,8 @@ The MCP server automatically respects your Obsidian vault's configured file excl
 
 - **Automatic Loading**: Reads exclusion patterns from `.obsidian/app.json` (`userIgnoreFilters` array)
 - **Default Exclusions**: Always excludes `.obsidian`, `.git`, and `.DS_Store`
-- **Smart Filtering**: Applied to `list_notes` and `search_vault` tools
-- **Flexible Reading**: You can still directly read excluded files with `read_note` when needed
+- **Smart Filtering**: Applied to `list_notes` and `search_vault` tools with glob-style path matching
+- **Consistent Access Rules**: `read_note` respects exclusion rules and will not read excluded paths
 
 ### How to Configure Exclusions in Obsidian
 

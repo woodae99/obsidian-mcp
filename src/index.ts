@@ -104,6 +104,20 @@ interface NoteInfo {
   nameWithoutExt: string;
 }
 
+type SearchMatchType = 'filename' | 'content' | 'both';
+type SearchSortBy = 'score' | 'path';
+type SortDirection = 'asc' | 'desc';
+
+interface SearchVaultOptions {
+  limit: number;
+  offset: number;
+  pathPrefix?: string;
+  extensions?: string[];
+  matchType: SearchMatchType;
+  sortBy: SearchSortBy;
+  sortDirection: SortDirection;
+}
+
 function buildNoteIndex(filePaths: string[]): NoteInfo[] {
   const noteIndex: NoteInfo[] = [];
   
@@ -985,7 +999,7 @@ const HTTP_HOST = CONFIG.httpHost;
 
 // Load exclusions from Obsidian settings
 function loadExclusions(): string[] {
-  const defaultExclusions = ['.obsidian', '.git', '.DS_Store'];
+  const defaultExclusions = ['.obsidian/', '.git/', '.DS_Store'];
   try {
     const appJsonPath = path.join(VAULT_PATH, '.obsidian', 'app.json');
     if (fs.existsSync(appJsonPath)) {
@@ -1001,6 +1015,99 @@ function loadExclusions(): string[] {
 }
 
 const EXCLUSIONS = loadExclusions();
+const GLOB_SPECIAL_CHARS = /[*?[\]{}()!+@]/;
+
+function normalizeVaultPath(filePath: string, trimTrailingSlash: boolean = true): string {
+  const normalized = filePath
+    .replace(/\\/g, '/')
+    .split(path.sep).join('/')
+    .replace(/^\.?\//, '');
+  return trimTrailingSlash ? normalized.replace(/\/+$/, '') : normalized;
+}
+
+function escapeRegexChar(char: string): string {
+  return /[|\\{}()[\]^$+?.]/.test(char) ? `\\${char}` : char;
+}
+
+function globToRegExp(globPattern: string): RegExp {
+  let regex = '^';
+  let i = 0;
+
+  while (i < globPattern.length) {
+    const char = globPattern[i];
+
+    if (char === '*') {
+      const nextChar = globPattern[i + 1];
+      if (nextChar === '*') {
+        regex += '.*';
+        i += 2;
+        continue;
+      }
+      regex += '[^/]*';
+      i++;
+      continue;
+    }
+
+    if (char === '?') {
+      regex += '[^/]';
+      i++;
+      continue;
+    }
+
+    regex += escapeRegexChar(char);
+    i++;
+  }
+
+  regex += '$';
+
+  return new RegExp(regex, process.platform === 'win32' ? 'i' : '');
+}
+
+function buildExclusionMatchers(patterns: string[]): RegExp[] {
+  const matchers: RegExp[] = [];
+  const seen = new Set<string>();
+
+  const addMatcher = (pattern: string) => {
+    const normalizedPattern = normalizeVaultPath(pattern);
+    if (!normalizedPattern || seen.has(normalizedPattern)) {
+      return;
+    }
+    seen.add(normalizedPattern);
+    matchers.push(globToRegExp(normalizedPattern));
+  };
+
+  for (const pattern of patterns) {
+    const normalizedPattern = normalizeVaultPath(pattern, false);
+    if (!normalizedPattern) {
+      continue;
+    }
+
+    const directoryPattern = normalizedPattern.endsWith('/');
+    const trimmedPattern = directoryPattern
+      ? normalizedPattern.slice(0, -1)
+      : normalizedPattern;
+
+    if (!trimmedPattern) {
+      continue;
+    }
+
+    if (directoryPattern || pattern.endsWith('/')) {
+      addMatcher(trimmedPattern);
+      addMatcher(`${trimmedPattern}/**`);
+      continue;
+    }
+
+    addMatcher(trimmedPattern);
+
+    if (!trimmedPattern.includes('/') && !GLOB_SPECIAL_CHARS.test(trimmedPattern)) {
+      addMatcher(`**/${trimmedPattern}`);
+    }
+  }
+
+  return matchers;
+}
+
+const EXCLUSION_MATCHERS = buildExclusionMatchers(EXCLUSIONS);
 
 function isExcluded(filePath: string): boolean {
   // Always exclude common system files/folders regardless of location
@@ -1009,32 +1116,12 @@ function isExcluded(filePath: string): boolean {
     return true;
   }
 
-  // Normalize path to use forward slashes for comparison
-  const normalizedPath = filePath.split(path.sep).join('/');
-
-  for (const exclusion of EXCLUSIONS) {
-    // Normalize exclusion path
-    let normalizedExclusion = exclusion.split(path.sep).join('/');
-
-    // Handle directory exclusion (ends with /)
-    if (normalizedExclusion.endsWith('/')) {
-      // Check if it matches the directory exactly or is a child of it
-      if (normalizedPath === normalizedExclusion.slice(0, -1) ||
-          normalizedPath.startsWith(normalizedExclusion)) {
-        return true;
-      }
-    } else {
-      // Exact match
-      if (normalizedPath === normalizedExclusion) {
-        return true;
-      }
-      // Check if it's a file inside an excluded folder (that didn't have trailing slash in config)
-      if (normalizedPath.startsWith(normalizedExclusion + '/')) {
-        return true;
-      }
-    }
+  const normalizedPath = normalizeVaultPath(filePath);
+  if (!normalizedPath) {
+    return false;
   }
-  return false;
+
+  return EXCLUSION_MATCHERS.some((matcher) => matcher.test(normalizedPath));
 }
 
 // Configuration loaded
@@ -1216,13 +1303,55 @@ class ObsidianMcpServer {
         },
         {
           name: 'search_vault',
-          description: 'Search for content in the Obsidian vault',
+          description: 'Search the vault with pagination, filtering, and sorting controls for large vault workflows.',
           inputSchema: {
             type: 'object',
             properties: {
               query: {
                 type: 'string',
-                description: 'Search query',
+                description: 'Required search term. Example: "complexity".',
+              },
+              limit: {
+                type: 'number',
+                minimum: 1,
+                maximum: 500,
+                default: 50,
+                description: 'Maximum number of results to return per call (1-500, default: 50).',
+              },
+              offset: {
+                type: 'number',
+                minimum: 0,
+                default: 0,
+                description: 'Zero-based index of the first result to return (default: 0).',
+              },
+              pathPrefix: {
+                type: 'string',
+                description: 'Optional vault-relative path prefix to scope results, e.g. "PhD/Thesis".',
+              },
+              extensions: {
+                type: 'array',
+                description: 'Optional file extension filter. Use values with or without dot, e.g. [".md", "pdf"].',
+                items: {
+                  type: 'string'
+                },
+              },
+              matchType: {
+                type: 'string',
+                enum: ['filename', 'content', 'both'],
+                default: 'both',
+                description: 'Match source selector: filename only, content only, or both (default: both).',
+              },
+              sortBy: {
+                type: 'string',
+                enum: ['score', 'path'],
+                default: 'score',
+                description: 'Sort key (default: score).',
+              },
+              sortDirection: {
+                type: 'string',
+                enum: ['asc', 'desc'],
+                default: 'desc',
+                description: 'Sort direction (default: desc).',
               },
             },
             required: ['query'],
@@ -1532,16 +1661,175 @@ class ObsidianMcpServer {
     if (!args?.query) {
       throw new Error('Search query is required');
     }
-    
-    const results = await this.searchVault(args.query);
-    
+
+    const options = this.parseSearchOptions(args);
+    const allResults = await this.searchVault(args.query);
+    const controlledResults = this.applySearchControls(allResults, args.query, options);
+
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(results, null, 2),
+          text: JSON.stringify(controlledResults, null, 2),
         },
       ],
+    };
+  }
+
+  private parseSearchOptions(args: any): SearchVaultOptions {
+    const limit = args?.limit !== undefined ? Number(args.limit) : 50;
+    const offset = args?.offset !== undefined ? Number(args.offset) : 0;
+    const pathPrefix = typeof args?.pathPrefix === 'string' && args.pathPrefix.trim().length > 0
+      ? normalizeVaultPath(args.pathPrefix.trim())
+      : undefined;
+    const rawExtensions = args?.extensions;
+    const matchType = (args?.matchType || 'both') as SearchMatchType;
+    const sortBy = (args?.sortBy || 'score') as SearchSortBy;
+    const sortDirection = (args?.sortDirection || 'desc') as SortDirection;
+
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('limit must be an integer between 1 and 500');
+    }
+
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new Error('offset must be a non-negative integer');
+    }
+
+    if (!['filename', 'content', 'both'].includes(matchType)) {
+      throw new Error('matchType must be one of: filename, content, both');
+    }
+
+    if (!['score', 'path'].includes(sortBy)) {
+      throw new Error('sortBy must be one of: score, path');
+    }
+
+    if (!['asc', 'desc'].includes(sortDirection)) {
+      throw new Error('sortDirection must be one of: asc, desc');
+    }
+
+    let extensions: string[] | undefined;
+    if (rawExtensions !== undefined) {
+      if (!Array.isArray(rawExtensions) || rawExtensions.some((ext) => typeof ext !== 'string' || !ext.trim())) {
+        throw new Error('extensions must be an array of non-empty strings');
+      }
+      extensions = rawExtensions.map((ext) => this.normalizeExtension(ext));
+    }
+
+    return {
+      limit,
+      offset,
+      pathPrefix,
+      extensions,
+      matchType,
+      sortBy,
+      sortDirection,
+    };
+  }
+
+  private normalizeExtension(extension: string): string {
+    const normalized = extension.trim().toLowerCase();
+    return normalized.startsWith('.') ? normalized : `.${normalized}`;
+  }
+
+  private extractResultPath(result: any): string {
+    return normalizeVaultPath(String(result?.path || result?.filename || ''));
+  }
+
+  private classifyResultMatchTypes(result: any, query: string): { filename: boolean; content: boolean } {
+    const pathValue = this.extractResultPath(result);
+    const lowerQuery = query.toLowerCase();
+    let filenameMatch = pathValue.toLowerCase().includes(lowerQuery);
+    let contentMatch = false;
+
+    if (Array.isArray(result?.matches)) {
+      for (const match of result.matches) {
+        if (match?.type === 'filename') {
+          filenameMatch = true;
+        }
+        if (match?.type === 'content') {
+          contentMatch = true;
+        }
+      }
+    }
+
+    return {
+      filename: filenameMatch,
+      content: contentMatch,
+    };
+  }
+
+  private applySearchControls(results: any[], query: string, options: SearchVaultOptions) {
+    const filtered = results.filter((result) => {
+      const resultPath = this.extractResultPath(result);
+      if (!resultPath) {
+        return false;
+      }
+
+      if (options.pathPrefix) {
+        const normalizedPrefix = options.pathPrefix.toLowerCase();
+        const lowerPath = resultPath.toLowerCase();
+        const pathStartsWithPrefix = lowerPath === normalizedPrefix || lowerPath.startsWith(`${normalizedPrefix}/`);
+        if (!pathStartsWithPrefix) {
+          return false;
+        }
+      }
+
+      if (options.extensions && options.extensions.length > 0) {
+        const resultExtension = path.extname(resultPath).toLowerCase();
+        if (!options.extensions.includes(resultExtension)) {
+          return false;
+        }
+      }
+
+      const matchTypes = this.classifyResultMatchTypes(result, query);
+      if (options.matchType === 'filename' && !matchTypes.filename) {
+        return false;
+      }
+      if (options.matchType === 'content' && !matchTypes.content) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const sorted = [...filtered].sort((a, b) => {
+      if (options.sortBy === 'path') {
+        const pathA = this.extractResultPath(a);
+        const pathB = this.extractResultPath(b);
+        const pathCmp = pathA.localeCompare(pathB, undefined, { sensitivity: 'base' });
+        return options.sortDirection === 'asc' ? pathCmp : -pathCmp;
+      }
+
+      const scoreA = Number(a?.score ?? 0);
+      const scoreB = Number(b?.score ?? 0);
+      const scoreCmp = scoreA - scoreB;
+      if (scoreCmp !== 0) {
+        return options.sortDirection === 'asc' ? scoreCmp : -scoreCmp;
+      }
+
+      const pathA = this.extractResultPath(a);
+      const pathB = this.extractResultPath(b);
+      return pathA.localeCompare(pathB, undefined, { sensitivity: 'base' });
+    });
+
+    const pagedResults = sorted.slice(options.offset, options.offset + options.limit);
+    const total = sorted.length;
+
+    return {
+      query,
+      total,
+      returned: pagedResults.length,
+      offset: options.offset,
+      limit: options.limit,
+      hasMore: options.offset + pagedResults.length < total,
+      filters: {
+        pathPrefix: options.pathPrefix || null,
+        extensions: options.extensions || null,
+        matchType: options.matchType,
+        sortBy: options.sortBy,
+        sortDirection: options.sortDirection,
+      },
+      results: pagedResults,
     };
   }
 
