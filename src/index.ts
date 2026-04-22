@@ -1108,6 +1108,7 @@ function buildExclusionMatchers(patterns: string[]): RegExp[] {
 }
 
 const EXCLUSION_MATCHERS = buildExclusionMatchers(EXCLUSIONS);
+const VAULT_GUIDE_URI = 'obsidian://vault-guide';
 
 function isExcluded(filePath: string): boolean {
   // Always exclude common system files/folders regardless of location
@@ -1178,18 +1179,17 @@ class ObsidianMcpServer {
     // List available resources
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
       try {
-        // Get list of files in the vault
-        const files = await this.listVaultFiles();
-        
-        // Map files to resources
-        const resources = files.map(file => ({
-          uri: `obsidian://${encodeURIComponent(file)}`,
-          name: path.basename(file),
-          mimeType: 'text/markdown',
-          description: `Markdown note: ${file}`,
-        }));
-        
-        return { resources };
+        // Avoid dumping the full vault into context during resource discovery.
+        return {
+          resources: [
+            {
+              uri: VAULT_GUIDE_URI,
+              name: 'Vault Discovery Guide',
+              mimeType: 'text/plain',
+              description: 'Use search_vault or scoped list_notes calls to discover notes without enumerating the entire vault.',
+            },
+          ],
+        };
       } catch (error) {
         console.error('Error listing resources:', error);
         throw new McpError(
@@ -1202,6 +1202,23 @@ class ObsidianMcpServer {
     // Read resource content
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       try {
+        if (request.params.uri === VAULT_GUIDE_URI) {
+          return {
+            contents: [
+              {
+                uri: request.params.uri,
+                mimeType: 'text/plain',
+                text: [
+                  'Obsidian vault resources are intentionally not enumerated by default.',
+                  'Use search_vault for keyword-based discovery with pagination, filtering, and sorting.',
+                  'Use list_notes with a specific folder and/or recursive=false when you want a narrower listing.',
+                  'Use read_note once you know the target path.'
+                ].join('\n'),
+              },
+            ],
+          };
+        }
+
         const match = request.params.uri.match(/^obsidian:\/\/(.+)$/);
         if (!match) {
           throw new McpError(
@@ -1238,17 +1255,17 @@ class ObsidianMcpServer {
       tools: [
         {
           name: 'list_notes',
-          description: 'List notes in the Obsidian vault. By default lists all notes recursively.',
+          description: 'List notes in the Obsidian vault. Prefer specifying a folder or setting recursive to false to avoid returning a very large vault-wide listing.',
           inputSchema: {
             type: 'object',
             properties: {
               folder: {
                 type: 'string',
-                description: 'Folder path within the vault (optional). If not provided, lists from vault root.',
+                description: 'Folder path within the vault (recommended). If omitted, listing starts from the vault root.',
               },
               recursive: {
                 type: 'boolean',
-                description: 'Whether to list files recursively in subdirectories (default: true)',
+                description: 'Whether to include files in subdirectories (default: true). Set to false for narrower, lower-context listings.',
                 default: true,
               },
             },
@@ -1610,6 +1627,9 @@ class ObsidianMcpServer {
   private async handleListNotes(args: any) {
     const folder = args?.folder || '';
     const recursive = args?.recursive !== undefined ? args.recursive : true;
+    if (!folder && recursive) {
+      console.error('[INFO] list_notes called with vault-wide recursive scope; consider search_vault or a scoped folder for lower-context discovery.');
+    }
     const files = await this.listVaultFiles(folder, recursive);
     
     return {
