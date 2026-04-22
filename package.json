@@ -7,10 +7,10 @@
     "obsidian-mcp": "./build/index.js"
   },
   "scripts": {
-    "build": "tsc && chmod +x build/index.js",
+    "build": "tsc && node scripts/ensure-executable.mjs",
     "start": "node build/index.js",
     "dev": "ts-node --esm src/index.ts",
-    "test": "node test-mcp.js",
+    "test": "node scripts/smoke-test.mjs",
     "generate-dxt": "npm run build && node generate-dxt.js",
     "prepublishOnly": "npm run build"
   },
