@@ -264,11 +264,16 @@ All installation methods require the following configuration:
 
 ## Testing
 
-The project includes a test script to verify server functionality:
+Run the automated test suite:
 
 ```bash
-node test-mcp.js
+npm test
 ```
+
+Current test stages:
+- `scripts/smoke-test.mjs` (CLI/build smoke coverage)
+- `scripts/stage1-test.mjs` (metadata/properties/editing tool workflows)
+- `scripts/stage2-test.mjs` (Base creation/validation/query workflows)
 
 ## Development
 

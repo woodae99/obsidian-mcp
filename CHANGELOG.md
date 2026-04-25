@@ -6,6 +6,31 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Concurrency-Safe File State Guards**:
+  - Added optional `expectedHash` and `expectedMtime` precondition checks to mutating workflows
+  - Added file state metadata (hash/mtime/ctime/size) for safer AI-driven edit loops
+- **Structured Note Edit Engine (V2)**:
+  - Added `replaceRange` mode in `update_note` for explicit line-range replacement
+  - Added `expectedCount` support for replace operations to prevent ambiguous replacements
+  - `update_note` now returns structured edit results and optional unified diff output
+- **Frontmatter + Metadata Tooling (Stage 1)**:
+  - Added `get_note_metadata` for headings, block IDs, links, tags, and file state
+  - Added `get_properties`, `set_properties`, and `remove_properties` for YAML frontmatter management
+  - Added Markdown insertion helpers: `format_wikilink`, `insert_wikilink`, `insert_embed`, `insert_callout`, `append_task`, `toggle_task`
+- **Obsidian Bases Tooling (Stage 2)**:
+  - Added `get_base`, `validate_base`, `create_base`, `add_base_view`, `update_base_view`, `set_base_filters`, `set_base_formula`, `insert_base_embed`, and `query_base`
+  - Added validation for base filters/formulas/views with warnings for high-cost patterns
+  - Added lightweight formula/filter evaluation to support server-side base querying
+- **Create Note Safety Enhancements**:
+  - `create_note` now supports `overwrite` and `dryRun`
+  - Create operations now return structured results with creation/overwrite status and optional diff
+- **Integration Test Expansion**:
+  - Added `scripts/stage1-test.mjs` for Stage 1 tool coverage
+  - Added `scripts/stage2-test.mjs` for Stage 2 base workflow coverage
+  - `npm test` now runs smoke tests plus Stage 1 and Stage 2 integration suites
+- **Dependency Update**:
+  - Added `yaml` runtime dependency for frontmatter and base document parsing/serialization
+
 - **Search Controls for Large Vaults**:
   - `search_vault` now supports `limit`, `offset`, `pathPrefix`, `extensions`, `matchType`, `sortBy`, and `sortDirection`
   - Search responses now include `total`, `returned`, `hasMore`, and paged `results`
