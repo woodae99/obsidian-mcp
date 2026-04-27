@@ -40,8 +40,8 @@ MCP 服务器提供以下全面的工具集：
   - 过滤：`pathPrefix`、`extensions`、`matchType`（`filename` | `content` | `both`）
   - 排序：`sortBy`（`score` | `path`）、`sortDirection`（`asc` | `desc`）
   - 返回结果：包含 `total`、`returned`、`hasMore` 和当前页 `results`
-- `move_note`: 移动或重命名笔记到新位置 (支持所有文件类型包括PDF)
-- `manage_folder`: 完整的文件夹 CRUD 操作 (创建/重命名/移动/删除)
+- `move_note`: 默认通过 Obsidian Core 移动或重命名笔记，从而更新入站链接。需要配套的 `obsidian-link-extension` 路由；不安全的文件系统回退必须显式请求。
+- `manage_folder`: 完整的文件夹 CRUD 操作。`rename` 和 `move` 通过 `obsidian-link-extension` 调用 Obsidian Core，更新指向文件夹内笔记的链接；`create` 和 `delete` 使用文件系统操作并返回结构化元数据/警告。
 
 ### 🚀 高级功能
 - `update_note`: **增强版** 支持文本替换或精确插入的内容更新
@@ -50,10 +50,10 @@ MCP 服务器提供以下全面的工具集：
   - **全新** 基于块ID的插入，支持 `^block-id` 格式
   - **全新** PATCH API 集成，带文件系统回退
 
-- `auto_backlink_vault`: **🔗 自动反向链接生成**
-  - 智能扫描整个知识库中的笔记名称提及
+- `auto_backlink_vault`: **🔗 内容增强 / 提及链接**
+  - 扫描笔记中对其他笔记名称的纯文本提及
   - 将文本引用转换为 wikilink 格式 (`[[笔记名]]`)
-  - 智能模式匹配，防止误识别
+  - 不用于结构性移动/重命名的链接维护；这些操作交由 Obsidian Core 处理
   - 可配置的预览模式和批处理
   
 - `notes_insight`: **🧠 AI 驱动的战略分析** ⭐ **全新功能**
@@ -62,6 +62,28 @@ MCP 服务器提供以下全面的工具集：
   - AI 驱动的内容摘要，优化上下文长度
   - 结构化分析：约束识别 → 假设挑战 → 突破性解决方案
   - 可配置的分析深度和范围参数
+
+## 🔗 链接感知的移动和文件夹重命名
+
+`move_note` 与 `manage_folder` 的 `rename`/`move` 通过 Obsidian 自身执行结构性操作来保留链接：
+
+```text
+MCP 工具调用 → obsidian-link-extension 路由 → app.fileManager.renameFile() → Obsidian Core 链接更新流程
+```
+
+配置：
+
+- 环境变量：`OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE=/links/move-v3`
+- CLI 参数：`--link-plugin-move-route /links/move-v3`
+
+安全行为：
+
+- `move_note` 默认 `updateLinks: true`。如果链接感知插件路由不可用，工具会失败并给出警告，而不是静默执行可能破坏入站链接的原始移动。
+- 原始笔记移动需要显式设置 `updateLinks:false` 和 `allowUnsafeFallback:true`。
+- `manage_folder rename` 和 `manage_folder move` 使用同一路由，因为原始文件夹移动可能留下过期路径链接。
+- `manage_folder create` 和 `manage_folder delete` 使用文件系统操作并返回结构化元数据；删除会警告相关链接可能失效。
+
+实测 Obsidian Core 会更新 wikilink、嵌入、标题链接、别名链接、块链接和 URL 编码的相对 Markdown 链接；不会更新包含未编码空格的 Markdown 链接或以 vault 根路径书写的 Markdown 链接。
 
 ## 前提条件
 
@@ -117,7 +139,8 @@ MCP 服务器提供以下全面的工具集：
       "env": {
         "OBSIDIAN_VAULT_PATH": "/path/to/your/vault",
         "OBSIDIAN_API_TOKEN": "your_api_token",
-        "OBSIDIAN_API_PORT": "27123"
+        "OBSIDIAN_API_PORT": "27123",
+        "OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE": "/links/move-v3"
       }
     }
   }

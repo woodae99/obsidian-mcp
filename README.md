@@ -45,8 +45,8 @@ The MCP server provides the following comprehensive tools:
   - **Sorting**: `sortBy` (`score` | `path`) and `sortDirection` (`asc` | `desc`)
   - **Structured output**: Returns `total`, `returned`, `hasMore`, and paged `results`
   - **Respects exclusion settings**: Search results exclude files matching Obsidian's exclusion patterns
-- `move_note`: Move or rename notes to new locations (supports all file types including PDFs)
-- `manage_folder`: Complete folder CRUD operations (create/rename/move/delete)
+- `move_note`: Move or rename notes through Obsidian Core by default so inbound links are updated. Requires the companion `obsidian-link-extension` route for link-aware moves; explicit unsafe fallback is available only when requested.
+- `manage_folder`: Complete folder CRUD operations. `rename` and `move` use Obsidian Core through `obsidian-link-extension` so links to notes inside moved folders are updated; `create` and `delete` use filesystem operations and return structured metadata/warnings.
 
 ### 🚀 Advanced Features
 
@@ -56,9 +56,9 @@ The MCP server provides the following comprehensive tools:
   - **NEW** Block ID-based insertion with `^block-id` support
   - **NEW** PATCH API integration with filesystem fallback
 
-- `auto_backlink_vault`: **🔗 Auto Backlink Generation**
-  - Intelligently scan entire vault for note name mentions
-  - Convert text references to wikilink format (`[[note name]]`)
+- `auto_backlink_vault`: **🔗 Content Enrichment / Mention Linking**
+  - Scans notes for plain-text mentions of note names and converts them to wikilinks
+  - Not used for structural move/rename link maintenance; those operations delegate to Obsidian Core
   - Smart pattern matching with false positive prevention
   - Configurable dry-run mode and batch processing
 - `notes_insight`: **🧠 AI-Powered Strategic Analysis** ⭐
@@ -67,6 +67,38 @@ The MCP server provides the following comprehensive tools:
   - AI-driven content summarization for context optimization
   - Structured analysis: constraint identification → assumption challenges → breakthrough solutions
   - Configurable parameters for analysis depth and scope
+
+## 🔗 Link-aware Moves and Folder Renames
+
+`move_note` and `manage_folder` `rename`/`move` are designed to preserve Obsidian links by delegating the structural operation to Obsidian itself. The default flow is:
+
+```text
+MCP tool call → obsidian-link-extension route → app.fileManager.renameFile() → Obsidian Core link update flow
+```
+
+Requirements:
+
+- Obsidian desktop must be running.
+- Obsidian Local REST API must be reachable and authenticated.
+- The companion `obsidian-link-extension` plugin must expose the configured route, currently `/links/move-v3`.
+
+Configuration:
+
+- Environment variable: `OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE=/links/move-v3`
+- CLI flag: `--link-plugin-move-route /links/move-v3`
+
+Safety behavior:
+
+- `move_note` defaults to `updateLinks: true`. If the link-aware plugin route is unavailable, the tool fails with a warning instead of silently performing a raw move that could break inbound links.
+- Raw note moves require explicit opt-in with `updateLinks:false` and `allowUnsafeFallback:true`.
+- `manage_folder rename` and `manage_folder move` use the same link-aware route because raw folder moves can leave stale path links.
+- `manage_folder create` and `manage_folder delete` use filesystem operations and return structured metadata; delete warns that links to deleted notes may break.
+
+Native Obsidian behavior observed in live tests:
+
+- Wikilinks, embeds, heading links, alias links, block links, and URL-encoded relative Markdown links were updated by Obsidian Core.
+- Unencoded Markdown links containing spaces and Markdown links written as vault-root paths were not updated.
+- The MCP server/plugin should not infer or rewrite Obsidian link settings for structural operations; it delegates to Obsidian Core and reports the plugin response metadata.
 
 ## 🎯 Exclusion Settings Support
 
@@ -140,7 +172,8 @@ Simply add the following configuration to your MCP client config file:
       "env": {
         "OBSIDIAN_VAULT_PATH": "/path/to/your/vault",
         "OBSIDIAN_API_TOKEN": "your_api_token",
-        "OBSIDIAN_API_PORT": "27123"
+        "OBSIDIAN_API_PORT": "27123",
+        "OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE": "/links/move-v3"
       }
     }
   }

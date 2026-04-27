@@ -18,6 +18,9 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
 import { createTwoFilesPatch } from 'diff';
 import YAML from 'yaml';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 // Parse command line arguments for NPM usage
 function parseCliArgs() {
@@ -32,6 +35,7 @@ function parseCliArgs() {
     transport: process.env.OBSIDIAN_TRANSPORT || 'stdio',
     httpPort: process.env.OBSIDIAN_HTTP_PORT || '3000',
     httpHost: process.env.OBSIDIAN_HTTP_HOST || '127.0.0.1',
+    linkPluginMoveRoute: process.env.OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE || '/links/move-v3',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -57,6 +61,9 @@ function parseCliArgs() {
     } else if (arg === '--http-host' && i + 1 < args.length) {
       config.httpHost = args[i + 1];
       i++;
+    } else if (arg === '--link-plugin-move-route' && i + 1 < args.length) {
+      config.linkPluginMoveRoute = args[i + 1];
+      i++;
     } else if (arg === '--help' || arg === '-h') {
       console.log(`
 Obsidian MCP Server
@@ -71,6 +78,8 @@ Options:
   --transport <mode>    Transport mode: stdio or http (default: stdio)
   --http-port <port>    HTTP server port for SSE transport (default: 3000)
   --http-host <host>    HTTP server host for SSE transport (default: 127.0.0.1)
+  --link-plugin-move-route <route>
+                         Link-aware move route exposed by obsidian-link-extension (default: /links/move-v3)
   --help, -h            Show this help message
 
 Environment variables:
@@ -81,6 +90,8 @@ Environment variables:
   OBSIDIAN_TRANSPORT    Transport mode: stdio or http (default: stdio)
   OBSIDIAN_HTTP_PORT    HTTP server port for SSE transport (default: 3000)
   OBSIDIAN_HTTP_HOST    HTTP server host for SSE transport (default: 127.0.0.1)
+  OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE
+                        Link-aware move route exposed by obsidian-link-extension (default: /links/move-v3)
 
 Examples:
   obsidian-mcp --vault-path "/path/to/vault" --api-token "your-token"
@@ -109,6 +120,24 @@ interface NoteInfo {
 type SearchMatchType = 'filename' | 'content' | 'both';
 type SearchSortBy = 'score' | 'path';
 type SortDirection = 'asc' | 'desc';
+
+interface MoveNoteOptions {
+  updateLinks: boolean;
+  allowUnsafeFallback: boolean;
+  dryRun: boolean;
+}
+
+interface MoveNoteResult {
+  success?: boolean;
+  dryRun?: boolean;
+  sourcePath: string;
+  destinationPath: string;
+  mode: 'obsidian-core-link-aware' | 'unsafe-filesystem-or-rest';
+  linkUpdateMode?: string;
+  scannedVault?: boolean;
+  warning?: string;
+  pluginResponse?: any;
+}
 
 interface SearchVaultOptions {
   limit: number;
@@ -1216,6 +1245,9 @@ const API_TOKEN = CONFIG.apiToken;
 const API_PORT = CONFIG.apiPort;
 const API_HOST = CONFIG.apiHost;
 const API_BASE_URL = `http://${API_HOST}:${API_PORT}`;
+const LINK_PLUGIN_MOVE_ROUTE = CONFIG.linkPluginMoveRoute.startsWith('/')
+  ? CONFIG.linkPluginMoveRoute
+  : `/${CONFIG.linkPluginMoveRoute}`;
 const TRANSPORT_MODE = CONFIG.transport;
 const HTTP_PORT = parseInt(CONFIG.httpPort);
 const HTTP_HOST = CONFIG.httpHost;
@@ -2021,7 +2053,7 @@ class ObsidianMcpServer {
         },
         {
           name: 'move_note',
-          description: 'Move or rename a note to a new location in the Obsidian vault. Does not update inbound links yet; use with care.',
+          description: 'Move or rename a note through Obsidian Core so inbound links are updated. Requires obsidian-link-extension by default; unsafe filesystem fallback must be explicitly requested.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -2033,13 +2065,28 @@ class ObsidianMcpServer {
                 type: 'string',
                 description: 'New path where the note should be moved',
               },
+              updateLinks: {
+                type: 'boolean',
+                description: 'Use obsidian-link-extension / Obsidian Core to update links during the move. Defaults to true.',
+                default: true,
+              },
+              allowUnsafeFallback: {
+                type: 'boolean',
+                description: 'If updateLinks is true but the link extension is unavailable, allow a raw filesystem/API move that may break links. Defaults to false.',
+                default: false,
+              },
+              dryRun: {
+                type: 'boolean',
+                description: 'Preview the move without changing files. With updateLinks=true this calls the plugin dry-run endpoint.',
+                default: false,
+              },
             },
             required: ['sourcePath', 'destinationPath'],
           },
         },
         {
           name: 'manage_folder',
-          description: 'Create, rename, move, or delete a folder in the Obsidian vault. Destructive for delete/rename/move: verify paths before calling.',
+          description: 'Create, rename, move, or delete a folder in the Obsidian vault. Rename/move use obsidian-link-extension / Obsidian Core so links to notes inside the folder are updated. Destructive for delete: verify paths before calling.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -2325,7 +2372,7 @@ class ObsidianMcpServer {
         },
         {
           name: 'auto_backlink_vault',
-          description: 'Automatically add backlinks throughout the entire vault by detecting note names in content and converting them to wikilinks',
+          description: 'Explicit content-enrichment tool: scan notes for plain-text mentions of note names and convert them to Obsidian wikilinks. This is not used for move/rename link maintenance; structural link updates are handled by move_note via Obsidian Core. Dry-run defaults to true.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -2735,13 +2782,17 @@ class ObsidianMcpServer {
       throw new Error('Source path and destination path are required');
     }
     
-    await this.moveNote(args.sourcePath, args.destinationPath);
+    const result = await this.moveNote(args.sourcePath, args.destinationPath, {
+      updateLinks: args.updateLinks !== false,
+      allowUnsafeFallback: args.allowUnsafeFallback === true,
+      dryRun: args.dryRun === true,
+    });
     
     return {
       content: [
         {
           type: 'text',
-          text: `Note moved successfully from ${args.sourcePath} to ${args.destinationPath}`,
+          text: JSON.stringify(result, null, 2),
         },
       ],
     };
@@ -2768,55 +2819,59 @@ class ObsidianMcpServer {
     }
 
     switch (operation) {
-      case 'create':
-        await this.createFolder(folderPath);
+      case 'create': {
+        const result = await this.createFolder(folderPath);
         return {
           content: [
             {
               type: 'text',
-              text: `Folder created successfully at ${folderPath}`,
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
+      }
       
-      case 'rename':
+      case 'rename': {
         if (!newPath) {
           throw new Error('New path is required for rename operation');
         }
-        await this.renameFolder(folderPath, newPath);
+        const result = await this.renameFolder(folderPath, newPath);
         return {
           content: [
             {
               type: 'text',
-              text: `Folder renamed from ${folderPath} to ${newPath}`,
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
+      }
       
-      case 'move':
+      case 'move': {
         if (!newPath) {
           throw new Error('New path is required for move operation');
         }
-        await this.moveFolder(folderPath, newPath);
+        const result = await this.moveFolder(folderPath, newPath);
         return {
           content: [
             {
               type: 'text',
-              text: `Folder moved from ${folderPath} to ${newPath}`,
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
+      }
       
-      case 'delete':
-        await this.deleteFolder(folderPath);
+      case 'delete': {
+        const result = await this.deleteFolder(folderPath);
         return {
           content: [
             {
               type: 'text',
-              text: `Folder deleted successfully: ${folderPath}`,
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
+      }
       
       default:
         throw new Error(`Unknown folder operation: ${operation}`);
@@ -4074,7 +4129,7 @@ Your goal is to help users see beyond apparent limitations and discover innovati
     }
   }
 
-  private async moveNote(sourcePath: string, destinationPath: string): Promise<void> {
+  private async moveNote(sourcePath: string, destinationPath: string, options: MoveNoteOptions): Promise<MoveNoteResult> {
     if (isExcluded(sourcePath)) {
       throw new Error(`Note not found: ${sourcePath}`);
     }
@@ -4082,132 +4137,177 @@ Your goal is to help users see beyond apparent limitations and discover innovati
       throw new Error(`Cannot move note to excluded path: ${destinationPath}`);
     }
 
-    try {
-      // First try using the Obsidian API - using standard file operations
-      // Most Obsidian Local REST API implementations don't support direct move operations
-      // So we'll read the source file and create it at the destination, then delete the source
-      
-      // Read source file content via API
-      const sourceResponse = await this.api.get(`/vault/${encodeURIComponent(sourcePath)}`);
-      const content = sourceResponse.data.content || '';
-      
-      // Create destination file via API
-      await this.api.post(`/vault/${encodeURIComponent(destinationPath)}`, { content });
-      
-      // Delete source file via API
-      await this.api.delete(`/vault/${encodeURIComponent(sourcePath)}`);
-      
-    } catch (error) {
-      // Fallback to file system operations
-      const sourceFullPath = path.join(VAULT_PATH, sourcePath);
-      const destFullPath = path.join(VAULT_PATH, destinationPath);
-      
-      // Validate source file exists
-      if (!fs.existsSync(sourceFullPath)) {
-        throw new Error(`Source note not found: ${sourcePath}`);
-      }
-      
-      // Check if destination already exists
-      if (fs.existsSync(destFullPath)) {
-        throw new Error(`Destination already exists: ${destinationPath}`);
-      }
-      
-      // Create destination directory if it doesn't exist
-      const destDir = path.dirname(destFullPath);
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true });
-      }
-      
-      // Use filesystem rename (works for all file types including PDF)
+    if (options.updateLinks) {
       try {
-        fs.renameSync(sourceFullPath, destFullPath);
-      } catch (renameError) {
-        throw new Error(`Failed to move file: ${renameError}`);
-      }
-      
-      // Clean up empty source directory if needed
-      const sourceDir = path.dirname(sourceFullPath);
-      if (sourceDir !== VAULT_PATH) {
-        try {
-          const items = fs.readdirSync(sourceDir);
-          if (items.length === 0) {
-            fs.rmdirSync(sourceDir);
-          }
-        } catch (error) {
-          // Ignore errors when cleaning up empty directories
+        const response = await this.api.post(LINK_PLUGIN_MOVE_ROUTE, {
+          oldPath: sourcePath,
+          newPath: destinationPath,
+          dryRun: options.dryRun,
+        });
+
+        if (response.data?.success === false) {
+          throw new Error(`obsidian-link-extension did not confirm note move: ${JSON.stringify(response.data)}`);
         }
+
+        return {
+          success: response.data?.success,
+          dryRun: response.data?.dryRun,
+          sourcePath,
+          destinationPath,
+          mode: 'obsidian-core-link-aware',
+          linkUpdateMode: response.data?.linkUpdateMode || 'obsidian-core-fileManager.renameFile',
+          scannedVault: response.data?.scannedVault === false ? false : undefined,
+          pluginResponse: response.data,
+        };
+      } catch (error) {
+        if (!options.allowUnsafeFallback) {
+          throw new Error([
+            `Link-aware move failed via obsidian-link-extension route ${LINK_PLUGIN_MOVE_ROUTE}.`,
+            'This operation may break links if performed as a raw filesystem/API move.',
+            'Install/enable the obsidian-link-extension plugin, ensure Local REST API is running, or retry with updateLinks:false and allowUnsafeFallback:true if you intentionally accept broken inbound links.',
+            `Original error: ${error instanceof Error ? error.message : String(error)}`,
+          ].join(' '));
+        }
+
+        console.warn('Link-aware move failed; performing explicitly allowed unsafe fallback:', error);
+      }
+    } else if (!options.allowUnsafeFallback) {
+      throw new Error('Raw move requested with updateLinks:false, but allowUnsafeFallback was not true. Refusing because this operation may break inbound links.');
+    }
+
+    if (options.dryRun) {
+      return {
+        dryRun: true,
+        sourcePath,
+        destinationPath,
+        mode: 'unsafe-filesystem-or-rest',
+        warning: 'Dry run only. This fallback path does not update inbound links and should be used only when link preservation is not required.',
+      };
+    }
+
+    await this.moveNoteUnsafe(sourcePath, destinationPath);
+    return {
+      success: true,
+      sourcePath,
+      destinationPath,
+      mode: 'unsafe-filesystem-or-rest',
+      warning: 'Moved without Obsidian Core link updates. Existing inbound links may now be broken.',
+    };
+  }
+
+  private async moveNoteUnsafe(sourcePath: string, destinationPath: string): Promise<void> {
+    const sourceFullPath = getVaultFullPath(sourcePath);
+    const destFullPath = getVaultFullPath(destinationPath);
+
+    if (!fs.existsSync(sourceFullPath)) {
+      throw new Error(`Source note not found: ${sourcePath}`);
+    }
+
+    if (fs.existsSync(destFullPath)) {
+      throw new Error(`Destination already exists: ${destinationPath}`);
+    }
+
+    const destDir = path.dirname(destFullPath);
+    if (!fs.existsSync(destDir)) {
+      fs.mkdirSync(destDir, { recursive: true });
+    }
+
+    try {
+      fs.renameSync(sourceFullPath, destFullPath);
+    } catch (renameError) {
+      throw new Error(`Failed to move file: ${renameError}`);
+    }
+
+    const sourceDir = path.dirname(sourceFullPath);
+    if (sourceDir !== VAULT_PATH) {
+      try {
+        const items = fs.readdirSync(sourceDir);
+        if (items.length === 0) {
+          fs.rmdirSync(sourceDir);
+        }
+      } catch (error) {
+        // Ignore errors when cleaning up empty directories
       }
     }
   }
 
   // Folder operation methods
-  private async createFolder(folderPath: string): Promise<void> {
+  private async createFolder(folderPath: string): Promise<any> {
+    const fullPath = getVaultFullPath(folderPath);
+    const alreadyExists = fs.existsSync(fullPath);
+
+    if (!alreadyExists) {
+      fs.mkdirSync(fullPath, { recursive: true });
+    }
+
+    return {
+      success: true,
+      operation: 'create',
+      path: folderPath,
+      mode: 'filesystem',
+      created: !alreadyExists,
+      alreadyExists,
+    };
+  }
+
+  private async renameFolder(folderPath: string, newPath: string): Promise<any> {
+    return await this.moveFolderViaObsidianCore('rename', folderPath, newPath);
+  }
+
+  private async moveFolder(folderPath: string, newPath: string): Promise<any> {
+    return await this.moveFolderViaObsidianCore('move', folderPath, newPath);
+  }
+
+  private async moveFolderViaObsidianCore(operation: 'rename' | 'move', folderPath: string, newPath: string): Promise<any> {
     try {
-      // First try using the Obsidian API
-      await this.api.post(`/folders/${encodeURIComponent(folderPath)}`);
-    } catch (error) {
-      console.warn('API request failed, falling back to file system:', error);
-      
-      // Fallback to file system if API fails
-      const fullPath = path.join(VAULT_PATH, folderPath);
-      
-      if (!fs.existsSync(fullPath)) {
-        fs.mkdirSync(fullPath, { recursive: true });
+      const response = await this.api.post(LINK_PLUGIN_MOVE_ROUTE, {
+        oldPath: folderPath,
+        newPath,
+        dryRun: false,
+      });
+
+      if (response.data?.success === false) {
+        throw new Error(`obsidian-link-extension did not confirm folder move: ${JSON.stringify(response.data)}`);
       }
+
+      return {
+        success: true,
+        operation,
+        sourcePath: folderPath,
+        destinationPath: newPath,
+        mode: 'obsidian-core-link-aware',
+        linkUpdateMode: response.data?.linkUpdateMode || 'obsidian-core-fileManager.renameFile',
+        scannedVault: response.data?.scannedVault === false ? false : undefined,
+        pluginResponse: response.data,
+      };
+    } catch (error) {
+      throw new Error([
+        `Link-aware folder move failed via obsidian-link-extension route ${LINK_PLUGIN_MOVE_ROUTE}.`,
+        'A raw filesystem folder move may break links to notes inside that folder.',
+        'Install/enable the obsidian-link-extension plugin and ensure Local REST API is running before retrying.',
+        `Original error: ${error instanceof Error ? error.message : String(error)}`,
+      ].join(' '));
     }
   }
 
-  private async renameFolder(folderPath: string, newPath: string): Promise<void> {
-    try {
-      // First try using the Obsidian API
-      await this.api.put(`/folders/${encodeURIComponent(folderPath)}`, { newPath });
-    } catch (error) {
-      console.warn('API request failed, falling back to file system:', error);
-      
-      // Fallback to file system if API fails
-      const fullPath = path.join(VAULT_PATH, folderPath);
-      const newFullPath = path.join(VAULT_PATH, newPath);
-      
-      if (!fs.existsSync(fullPath)) {
-        throw new Error(`Folder not found: ${folderPath}`);
-      }
-      
-      if (fs.existsSync(newFullPath)) {
-        throw new Error(`Destination folder already exists: ${newPath}`);
-      }
-      
-      // Create parent directory if it doesn't exist
-      const parentDir = path.dirname(newFullPath);
-      if (!fs.existsSync(parentDir)) {
-        fs.mkdirSync(parentDir, { recursive: true });
-      }
-      
-      fs.renameSync(fullPath, newFullPath);
-    }
-  }
+  private async deleteFolder(folderPath: string): Promise<any> {
+    const fullPath = getVaultFullPath(folderPath);
 
-  private async moveFolder(folderPath: string, newPath: string): Promise<void> {
-    // Move is essentially the same as rename in this context
-    await this.renameFolder(folderPath, newPath);
-  }
-
-  private async deleteFolder(folderPath: string): Promise<void> {
-    try {
-      // First try using the Obsidian API
-      await this.api.delete(`/folders/${encodeURIComponent(folderPath)}`);
-    } catch (error) {
-      console.warn('API request failed, falling back to file system:', error);
-      
-      // Fallback to file system if API fails
-      const fullPath = path.join(VAULT_PATH, folderPath);
-      
-      if (!fs.existsSync(fullPath)) {
-        throw new Error(`Folder not found: ${folderPath}`);
-      }
-      
-      // Recursively delete the folder and its contents
-      this.deleteFolderRecursive(fullPath);
+    if (!fs.existsSync(fullPath)) {
+      throw new Error(`Folder not found: ${folderPath}`);
     }
+
+    // Recursively delete the folder and its contents. This is intentionally not
+    // link-aware; callers should verify destructive deletes before using it.
+    this.deleteFolderRecursive(fullPath);
+
+    return {
+      success: true,
+      operation: 'delete',
+      path: folderPath,
+      mode: 'filesystem',
+      warning: 'Folder deleted without link updates. Any links to deleted notes may now be broken.',
+    };
   }
 
   private deleteFolderRecursive(folderPath: string): void {

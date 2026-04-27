@@ -10,7 +10,7 @@ This is an Obsidian MCP (Model Context Protocol) server that enables AI models t
 
 - **Main Server**: `src/index.ts` - Single-file TypeScript implementation using the MCP SDK
 - **Core Class**: `ObsidianMcpServer` - Handles all MCP protocol operations and Obsidian API interactions
-- **Dual API Strategy**: Primary Obsidian REST API calls with filesystem fallback for reliability
+- **API Strategy**: Obsidian Local REST API for note CRUD/search; link-aware note/folder move operations delegate to Obsidian Core through the companion `obsidian-link-extension` route instead of raw filesystem fallback.
 - **Transport**: Uses stdio transport for MCP communication
 - **Environment Configuration**: Uses dotenv for API tokens and vault paths
 
@@ -38,17 +38,18 @@ npm test
 - `create_note` - Create new notes
 - `search_vault` - Smart search across vault (filename + content, all file types)
 - `delete_note` - Delete notes
-- `move_note` - Move/rename notes to new locations (filesystem-level operations, supports all file types including PDF, images, and large files without content copying)
-- `manage_folder` - CRUD operations for folders (create/rename/move/delete)
+- `move_note` - Move/rename notes through Obsidian Core by default so inbound links are updated; unsafe filesystem fallback requires explicit opt-in
+- `manage_folder` - Folder CRUD; rename/move use Obsidian Core through `obsidian-link-extension`, create/delete use filesystem operations with structured responses/warnings
 - `update_note` - Update content in existing notes using targeted text replacements
 - `read_multiple_notes` - Read content from multiple notes simultaneously
-- `auto_backlink_vault` - **NEW**: Automatically add backlinks throughout the entire vault by detecting note names in content and converting them to wikilinks
+- `auto_backlink_vault` - Content-enrichment tool that links plain-text mentions; not used for structural move/rename link maintenance
 - `notes_insight` - **NEW**: Generate strategic insights about a topic using TRILEMMA-PRINCIPLES framework with AI-powered content summarization
 
 ### Environment Variables:
 - `OBSIDIAN_VAULT_PATH` - Path to the Obsidian vault
 - `OBSIDIAN_API_TOKEN` - API token for Obsidian Local REST API plugin
 - `OBSIDIAN_API_PORT` - Port for Obsidian API (default: 27123)
+- `OBSIDIAN_LINK_PLUGIN_MOVE_ROUTE` - Link-aware move route exposed by `obsidian-link-extension` (default: `/links/move-v3`)
 
 ### Error Handling:
 - Graceful fallback from Obsidian API to direct filesystem operations
@@ -91,17 +92,15 @@ All methods require these configuration values:
 
 ## Key Features
 
-### Advanced File Operations
-- **Efficient Note Moving**: Uses filesystem-level operations (fs.renameSync) instead of content copying
-- **Universal File Support**: Handles all file types including PDF, images, videos, and binary files
-- **Large File Safe**: No upper limit on file size, avoids model context length restrictions  
-- **Atomic Operations**: Ensures file integrity with atomic filesystem operations
-- **Auto Directory Management**: Creates destination directories and cleans up empty source directories
+### Link-aware Structural Operations
+- **Obsidian Core Delegation**: `move_note` and `manage_folder` rename/move call the configured `obsidian-link-extension` route, which invokes `app.fileManager.renameFile()` inside Obsidian.
+- **Native Link Updates**: Obsidian Core handles recognized wikilinks/Markdown links according to its own settings and prompts; the MCP server does not scan/rewrite the vault for structural moves.
+- **Safe Defaults**: Missing plugin route fails safely instead of silently falling back to raw filesystem moves. Raw note fallback requires explicit `updateLinks:false` and `allowUnsafeFallback:true`.
+- **Structured Results**: Move/rename responses include mode, link update mode, scan status, and plugin response metadata such as `sourceType`, `moved`, and `renamePromiseSettled` when available.
 
 ### Robust Error Handling
-- **Dual API Strategy**: Primary Obsidian REST API with filesystem fallback
-- **Comprehensive Validation**: Checks source existence and destination conflicts
-- **Graceful Degradation**: Falls back to reliable filesystem operations when API fails
+- **Comprehensive Validation**: Checks source existence, destination conflicts, and exclusion rules.
+- **Explicit Fallbacks**: Filesystem fallbacks are used for folder create/delete and explicit unsafe note moves only; link-preserving moves require the plugin route.
 
 ## Docker Support
 
@@ -122,7 +121,7 @@ To enable debug mode:
 
 ## Auto Backlink Vault Tool
 
-The `auto_backlink_vault` tool provides intelligent automation for creating backlinks across your entire Obsidian vault. It scans all notes for mentions of other note names and automatically converts them to wikilink format (`[[note name]]`).
+The `auto_backlink_vault` tool is a content-enrichment / mention-linking tool. It scans notes for plain-text mentions of other note names and can convert those mentions to wikilinks (`[[note name]]`). It is intentionally separate from structural link maintenance: note/folder moves and renames are handled by Obsidian Core via `move_note` / `manage_folder` and the companion link extension.
 
 ### Key Features:
 - **Smart Detection**: Identifies note names in content while avoiding false positives

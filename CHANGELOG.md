@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added link-aware `move_note` behavior via the configurable `obsidian-link-extension` route (`/links/move-v3` by default), delegating structural moves to Obsidian Core so recognized inbound links are updated.
+- Added link-aware `manage_folder` rename/move behavior through the same Obsidian Core route; folder create/delete now return structured filesystem metadata/warnings.
+- Added explicit unsafe fallback controls for raw note moves (`updateLinks:false` plus `allowUnsafeFallback:true`) and fail-safe errors when the link-aware route is missing.
+- Reframed `auto_backlink_vault` as explicit content enrichment / mention linking rather than move/rename link maintenance.
+- Documented observed Obsidian Core link-update behavior: wikilinks and URL-encoded relative Markdown links update; unencoded Markdown links with spaces and vault-root Markdown paths may not.
+
 - **Concurrency-Safe File State Guards**:
   - Added optional `expectedHash` and `expectedMtime` precondition checks to mutating workflows
   - Added file state metadata (hash/mtime/ctime/size) for safer AI-driven edit loops

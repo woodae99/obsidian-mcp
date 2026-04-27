@@ -10,7 +10,7 @@
     "build": "tsc && node scripts/ensure-executable.mjs",
     "start": "node build/index.js",
     "dev": "ts-node --esm src/index.ts",
-    "test": "node scripts/smoke-test.mjs && node scripts/stage1-test.mjs && node scripts/stage2-test.mjs",
+    "test": "node scripts/smoke-test.mjs && node scripts/stage1-test.mjs && node scripts/stage2-test.mjs && node scripts/stage3-test.mjs",
     "generate-dxt": "npm run build && node generate-dxt.js",
     "prepublishOnly": "npm run build"
   },
